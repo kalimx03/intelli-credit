@@ -31,10 +31,10 @@ REQUIRED_NARRATIVE_KEYS = {
 
 def _call_gemini(system, user_content, max_tokens=4096):
     prompt = system + "\n\n" + user_content
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             response = _client.models.generate_content(
-                model="gemini-1.5-flash",
+                model="gemini-2.0-flash-lite",
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     max_output_tokens=max_tokens,
@@ -44,8 +44,12 @@ def _call_gemini(system, user_content, max_tokens=4096):
             return response.text
         except Exception as e:
             logger.warning("Gemini error attempt %d: %s", attempt + 1, e)
-            time.sleep(2 ** attempt)
-    raise RuntimeError("Gemini API call failed after 3 attempts")
+            if "429" in str(e):
+                time.sleep(30)
+            else:
+                time.sleep(2 ** attempt)
+    raise RuntimeError("Gemini API call failed after 5 attempts")
+
 def _extract_json_from_text(text):
     text = text.strip()
     try:
