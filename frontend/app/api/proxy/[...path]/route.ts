@@ -2,14 +2,11 @@
 
 const BACKEND_URL = 'http://54.81.253.69:8000'
 
+export const maxDuration = 60
+
 async function handler(request: NextRequest, { params }: { params: { path: string[] } }) {
   const path = params.path.join('/')
   const url = `${BACKEND_URL}/${path}${request.nextUrl.search}`
-  
-  const headers: Record<string, string> = {}
-  request.headers.forEach((value, key) => {
-    if (key !== 'host') headers[key] = value
-  })
 
   let body = undefined
   if (request.method !== 'GET' && request.method !== 'HEAD') {
@@ -23,13 +20,12 @@ async function handler(request: NextRequest, { params }: { params: { path: strin
 
   const response = await fetch(url, {
     method: request.method,
-    headers,
     body: body as any,
   })
 
   const contentType = response.headers.get('content-type') || ''
-  
-  if (contentType.includes('application/pdf') || contentType.includes('application/octet-stream')) {
+
+  if (contentType.includes('application/pdf') || contentType.includes('octet-stream')) {
     const buffer = await response.arrayBuffer()
     return new NextResponse(buffer, {
       status: response.status,
