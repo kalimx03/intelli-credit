@@ -9,10 +9,10 @@ from models import ManagementInsightFlags
 
 logger = logging.getLogger(__name__)
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
-genai.configure(api_key="AIzaSyBcnL-2LwlJFTm6XM1OkAtpL6oJY4995O0")
-_client = genai.GenerativeModel("gemini-1.5-flash")
+_client = genai.Client(api_key="AIzaSyBcnL-2LwlJFTm6XM1OkAtpL6oJY4995O0")
 
 KNOWN_EXTRACTION_KEYS = {
     "revenue", "ebitda", "pat", "net_worth", "total_debt", "current_ratio",
@@ -33,9 +33,10 @@ def _call_gemini(system, user_content, max_tokens=4096):
     prompt = system + "\n\n" + user_content
     for attempt in range(3):
         try:
-            response = _client.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
+            response = _client.models.generate_content(
+                model="gemini-1.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
                     max_output_tokens=max_tokens,
                     temperature=0.1,
                 )
@@ -45,7 +46,6 @@ def _call_gemini(system, user_content, max_tokens=4096):
             logger.warning("Gemini error attempt %d: %s", attempt + 1, e)
             time.sleep(2 ** attempt)
     raise RuntimeError("Gemini API call failed after 3 attempts")
-
 def _extract_json_from_text(text):
     text = text.strip()
     try:
