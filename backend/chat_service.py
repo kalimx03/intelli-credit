@@ -6,17 +6,47 @@ logger = logging.getLogger(__name__)
 
 CHAT_SYSTEM_PROMPT = """You are Intelli-Credit's AI credit analyst assistant for Indian banking.
 You help bank officers understand credit appraisal reports and Indian banking regulations.
-You have two sources of information:
+You have three sources of information:
 1. The ANALYSIS DATA — actual extracted financials, Five Cs scores, and triggered risk rules
 2. REGULATORY CONTEXT — relevant RBI/GST/MCA guidelines retrieved from the knowledge base
+3. WEB SEARCH RESULTS — live news about the company, promoters, sector headwinds
+
 Your rules:
 - Always cite specific numbers from the analysis (e.g. "DSCR of 1.15x", "D/E ratio 3.8x")
 - When citing regulations, say which guideline it comes from (e.g. "As per RBI IRACP norms...")
+- When citing web results, mention the source
 - If something is not in the analysis data, say "the analysis does not contain this information"
 - Never invent financial figures
-- Keep answers focused and under 200 words unless the question requires more
+- Keep answers focused and under 300 words unless the question requires more
 - Use plain language — the audience is credit officers, not data scientists
 """
+
+def _web_search(query: str, max_results: int = 3) -> str:
+    try:
+        from duckduckgo_search import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        if not results:
+            return "No web results found."
+        lines = []
+        for r in results:
+            lines.append(f"SOURCE: {r.get('href', '')}")
+            lines.append(f"TITLE: {r.get('title', '')}")
+            lines.append(f"SNIPPET: {r.get('body', '')}")
+            lines.append("")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning("Web search failed: %s", e)
+        return "Web search temporarily unavailable."
+
+def _should_search_web(question: str) -> bool:
+    keywords = [
+        "news", "recent", "latest", "promoter", "litigation", "court", "fraud",
+        "sector", "industry", "headwind", "regulation", "rbi", "sebi", "mca",
+        "npa", "default", "bankrupt", "lawsuit", "scam", "controversy"
+    ]
+    q = question.lower()
+    return any(k in q for k in keywords)
 
 def _build_analysis_summary(data: Dict[str, Any]) -> str:
     fin     = data.get("extracted_financials", {})
@@ -122,6 +152,14 @@ def answer_question(
         logger.warning("RAG retrieval failed: %s", e)
         rag_context = "Regulatory context temporarily unavailable."
 
+    # Web search for news/litigation/sector queries
+    web_context = ""
+    if _should_search_web(question):
+        company = analysis_data.get("company_name", "")
+        search_query = f"{company} {question}"
+        logger.info("Web search triggered for: %s", search_query)
+        web_context = _web_search(search_query)
+
     analysis_summary = _build_analysis_summary(analysis_data)
 
     messages = []
@@ -130,11 +168,11 @@ def answer_question(
             if turn.get("role") in ("user", "assistant") and turn.get("content"):
                 messages.append({"role": turn["role"], "content": str(turn["content"])})
 
-    user_content = (
-        f"ANALYSIS DATA:\n{analysis_summary}"
-        f"\n\nREGULATORY CONTEXT:\n{rag_context}"
-        f"\n\nQUESTION: {question}"
-    )
+    user_content = f"ANALYSIS DATA:\n{analysis_summary}\n\nREGULATORY CONTEXT:\n{rag_context}"
+    if web_context:
+        user_content += f"\n\nLIVE WEB SEARCH RESULTS:\n{web_context}"
+    user_content += f"\n\nQUESTION: {question}"
+
     messages.append({"role": "user", "content": user_content})
 
     try:
@@ -159,4 +197,5 @@ def answer_question(
         "answer": answer,
         "sources": sources,
         "rag_chunks_used": len(all_chunks),
+        "web_search_used": bool(web_context),
     }
