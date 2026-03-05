@@ -9,10 +9,9 @@ from models import ManagementInsightFlags
 
 logger = logging.getLogger(__name__)
 
-from google import genai
-from google.genai import types
+from groq import Groq
 
-_client = genai.Client(api_key="AIzaSyBcnL-2LwlJFTm6XM1OkAtpL6oJY4995O0")
+_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
 
 KNOWN_EXTRACTION_KEYS = {
     "revenue", "ebitda", "pat", "net_worth", "total_debt", "current_ratio",
@@ -29,26 +28,23 @@ REQUIRED_NARRATIVE_KEYS = {
     "sector_conditions", "justification_narrative",
 }
 
-def _call_gemini(system, user_content, max_tokens=4096):
-    prompt = system + "\n\n" + user_content
-    for attempt in range(5):
+def _call_groq(system, user_content, max_tokens=4096):
+    for attempt in range(3):
         try:
-            response = _client.models.generate_content(
-                model="gemini-2.0-flash-lite",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    max_output_tokens=max_tokens,
-                    temperature=0.1,
-                )
+            response = _client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content}
+                ],
+                max_tokens=max_tokens,
+                temperature=0.1,
             )
-            return response.text
+            return response.choices[0].message.content
         except Exception as e:
-            logger.warning("Gemini error attempt %d: %s", attempt + 1, e)
-            if "429" in str(e):
-                time.sleep(30)
-            else:
-                time.sleep(2 ** attempt)
-    raise RuntimeError("Gemini API call failed after 5 attempts")
+            logger.warning("Groq error attempt %d: %s", attempt + 1, e)
+            time.sleep(2 ** attempt)
+    raise RuntimeError("Groq API call failed after 3 attempts")
 
 def _extract_json_from_text(text):
     text = text.strip()
@@ -90,7 +86,7 @@ def _sanitise_extraction(data):
 def extract_financials_from_text(document_text):
     user_msg = "Extract all financial and compliance data from this document:\n\n" + document_text
     try:
-        raw_text = _call_gemini(EXTRACTION_SYSTEM_PROMPT, user_msg, max_tokens=4096)
+        raw_text = _call_groq(EXTRACTION_SYSTEM_PROMPT, user_msg, max_tokens=4096)
     except RuntimeError:
         raise
     try:
@@ -104,7 +100,7 @@ def analyze_management_insights(primary_insights):
     if not primary_insights or not primary_insights.strip():
         return ManagementInsightFlags()
     try:
-        raw_text = _call_gemini(MANAGEMENT_INSIGHT_SYSTEM_PROMPT, primary_insights[:4000], max_tokens=1024)
+        raw_text = _call_groq(MANAGEMENT_INSIGHT_SYSTEM_PROMPT, primary_insights[:4000], max_tokens=1024)
         data = _extract_json_from_text(raw_text)
     except Exception as e:
         logger.warning("Management insight failed (%s). Using defaults.", e)
@@ -147,7 +143,7 @@ def generate_cam_narratives(company_name, financials_summary, scoring_summary, r
         "justification_narrative": f"Credit decision from Five Cs scoring. {scoring_summary[:300]}",
     }
     try:
-        raw_text = _call_gemini(CAM_NARRATIVE_SYSTEM_PROMPT, user_msg, max_tokens=4096)
+        raw_text = _call_groq(CAM_NARRATIVE_SYSTEM_PROMPT, user_msg, max_tokens=4096)
         data = _extract_json_from_text(raw_text)
     except Exception as e:
         logger.warning("CAM narrative failed (%s). Using fallback.", e)
