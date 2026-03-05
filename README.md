@@ -1,3 +1,4 @@
+![WhatsApp Image 2026-03-06 at 12 51 41 AM](https://github.com/user-attachments/assets/eafcf8aa-4a5f-485d-8316-2f51e383e0a7)
 # Intelli-Credit
 
 **AI-powered corporate credit decisioning engine for Indian banking.**
