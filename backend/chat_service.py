@@ -1,36 +1,14 @@
-"""
-CHAT SERVICE — RAG-Powered Credit Q&A
-=======================================
-
-HOW IT WORKS (plain English):
-  1. Analyst types a question: "Why was this company rejected?"
-  2. We embed that question → get a 384-number vector
-  3. ChromaDB finds the 4 most similar regulation chunks from our knowledge base
-  4. We build a prompt that contains:
-       - The full analysis data (scores, financials, triggered rules)
-       - The retrieved regulation chunks (RBI norms, GST rules, etc.)
-       - The question itself
-  5. Claude reads all of this and answers, citing actual regulations
-  6. We return the answer + which sources were used (for transparency)
-
-The analyst gets a grounded answer — not Claude guessing.
-"""
-
 import logging
 from typing import List, Dict, Any, Optional
-
 from rag_engine import retrieve_context, format_context_for_prompt, get_historical_context
 
 logger = logging.getLogger(__name__)
 
 CHAT_SYSTEM_PROMPT = """You are Intelli-Credit's AI credit analyst assistant for Indian banking.
-
 You help bank officers understand credit appraisal reports and Indian banking regulations.
-
 You have two sources of information:
 1. The ANALYSIS DATA — actual extracted financials, Five Cs scores, and triggered risk rules
 2. REGULATORY CONTEXT — relevant RBI/GST/MCA guidelines retrieved from the knowledge base
-
 Your rules:
 - Always cite specific numbers from the analysis (e.g. "DSCR of 1.15x", "D/E ratio 3.8x")
 - When citing regulations, say which guideline it comes from (e.g. "As per RBI IRACP norms...")
@@ -40,15 +18,12 @@ Your rules:
 - Use plain language — the audience is credit officers, not data scientists
 """
 
-
 def _build_analysis_summary(data: Dict[str, Any]) -> str:
-    """Turn the full analysis dict into a compact readable text for the LLM."""
     fin     = data.get("extracted_financials", {})
     scoring = data.get("scoring_result", {})
     warns   = data.get("validation_warnings", [])
 
     def fv(field: str):
-        """Get value safely from extracted financials."""
         f = fin.get(field, {})
         return f.get("value") if isinstance(f, dict) else None
 
@@ -94,19 +69,19 @@ def _build_analysis_summary(data: Dict[str, Any]) -> str:
             lines.append(f"  {label}: {v}")
 
     compliance_fields = [
-        ("Auditor Qualification (risk if Yes)", "auditor_qualification"),
-        ("GST 2A/3B Mismatch",                  "gst_mismatch"),
-        ("MCA Filing Default",                   "mca_filing_status"),
-        ("RBI Regulatory Risk",                  "rbi_regulatory_risk"),
-        ("Litigation Pending",                   "litigation_pending"),
-        ("Related Party Transactions",           "related_party_transactions"),
+        ("Auditor Qualification", "auditor_qualification"),
+        ("GST 2A/3B Mismatch",   "gst_mismatch"),
+        ("MCA Filing Default",    "mca_filing_status"),
+        ("RBI Regulatory Risk",   "rbi_regulatory_risk"),
+        ("Litigation Pending",    "litigation_pending"),
+        ("Related Party Transactions", "related_party_transactions"),
     ]
     lines.append("")
-    lines.append("COMPLIANCE FLAGS (Yes = risk flag):")
+    lines.append("COMPLIANCE FLAGS:")
     for label, field in compliance_fields:
         v = fv(field)
         if v is not None:
-            lines.append(f"  {label}: {'YES ⚠️' if v else 'No'}")
+            lines.append(f"  {label}: {'YES' if v else 'No'}")
 
     rule_log = scoring.get("rule_log", [])
     triggered = [r for r in rule_log if r.get("triggered")]
@@ -114,22 +89,7 @@ def _build_analysis_summary(data: Dict[str, Any]) -> str:
         lines.append("")
         lines.append(f"RISK RULES TRIGGERED ({len(triggered)}):")
         for r in triggered:
-            lines.append(
-                f"  [{r.get('category','').upper()}] {r.get('rule_name','')} "
-                f"→ score impact: {r.get('impact', 0):+.0f}"
-            )
-
-    mgmt = scoring.get("management_flags", {})
-    mgmt_on = [k for k, v in mgmt.items() if v is True and k != "raw_signals"]
-    if mgmt_on:
-        lines.append("")
-        lines.append(f"MANAGEMENT FLAGS: {', '.join(mgmt_on)}")
-
-    if warns:
-        lines.append("")
-        lines.append(f"DATA QUALITY WARNINGS ({len(warns)}):")
-        for w in warns[:4]:
-            lines.append(f"  {w}")
+            lines.append(f"  [{r.get('category','').upper()}] {r.get('rule_name','')} impact: {r.get('impact', 0):+.0f}")
 
     return "\n".join(lines)
 
@@ -139,20 +99,12 @@ def answer_question(
     analysis_data: Dict[str, Any],
     conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
-    """
-    Core RAG + LLM pipeline:
-      query → embed → retrieve → build prompt → Claude → return answer + sources
-    """
-    import anthropic
     import os
+    from groq import Groq
 
-    # ── Step 1: RAG retrieval ─────────────────────────────────────────────
     all_chunks = []
     try:
-        # Retrieve regulation chunks relevant to the question
         reg_chunks = retrieve_context(question, n_results=3)
-
-        # Also retrieve historical peer decisions
         score = analysis_data.get("scoring_result", {}).get("final_score", 50)
         sector = None
         fin = analysis_data.get("extracted_financials", {})
@@ -160,64 +112,51 @@ def answer_question(
         if isinstance(sf, dict):
             sector = sf.get("value")
         hist_chunks = get_historical_context(score, sector)
-
-        # Combine, deduplicate by title
         seen = set()
         for chunk in reg_chunks + hist_chunks:
             if chunk["title"] not in seen:
                 all_chunks.append(chunk)
                 seen.add(chunk["title"])
-
         rag_context = format_context_for_prompt(all_chunks[:4])
     except Exception as e:
-        logger.warning("RAG retrieval failed for chat (%s) — answering without context.", e)
+        logger.warning("RAG retrieval failed: %s", e)
         rag_context = "Regulatory context temporarily unavailable."
 
-    # ── Step 2: Build analysis summary ───────────────────────────────────
     analysis_summary = _build_analysis_summary(analysis_data)
 
-    # ── Step 3: Build messages ────────────────────────────────────────────
     messages = []
-
-    # Include prior conversation (last 6 turns for token budget)
     if conversation_history:
         for turn in conversation_history[-6:]:
             if turn.get("role") in ("user", "assistant") and turn.get("content"):
                 messages.append({"role": turn["role"], "content": str(turn["content"])})
 
-    # Current question with full context
     user_content = (
         f"ANALYSIS DATA:\n{analysis_summary}"
-        f"\n\nREGULATORY CONTEXT (retrieved from knowledge base):\n{rag_context}"
+        f"\n\nREGULATORY CONTEXT:\n{rag_context}"
         f"\n\nQUESTION: {question}"
     )
     messages.append({"role": "user", "content": user_content})
 
-    # ── Step 4: Call Claude ───────────────────────────────────────────────
     try:
-        client = anthropic.Anthropic(api_key=os.environ.get("CLAUDE_API_KEY", ""))
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+        client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "system", "content": CHAT_SYSTEM_PROMPT}] + messages,
             max_tokens=1024,
-            system=CHAT_SYSTEM_PROMPT,
-            messages=messages,
+            temperature=0.1,
         )
-        answer = response.content[0].text
+        answer = response.choices[0].message.content
     except Exception as e:
         logger.error("Chat LLM call failed: %s", e)
-        answer = (
-            f"I encountered an error: {e}. "
-            "Please check your CLAUDE_API_KEY and try again."
-        )
+        answer = f"I encountered an error: {e}. Please try again."
 
-    # ── Step 5: Return with sources ───────────────────────────────────────
     sources = [
         {"title": c["title"], "category": c["category"], "relevance": c["score"]}
         for c in all_chunks[:4]
     ]
 
     return {
-        "answer":          answer,
-        "sources":         sources,
+        "answer": answer,
+        "sources": sources,
         "rag_chunks_used": len(all_chunks),
     }
